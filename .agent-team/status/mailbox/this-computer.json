@@ -1,6 +1,6 @@
 {
   "schema": "agent-mailbox/v1",
-  "takenAt": "2026-11-04T00:30:45Z",
+  "takenAt": "2026-11-04T00:35:22Z",
   "computer": "This computer",
   "runner": "this-computer",
   "allows": {
@@ -20,6 +20,17 @@
     ]
   },
   "orders": [
+    {
+      "id": "16e04b8862f93363c558427021ba290c",
+      "action": "task",
+      "state": "claimed",
+      "at": "2026-11-04T00:35:19Z",
+      "startedAt": null,
+      "finishedAt": null,
+      "commit": null,
+      "why": null,
+      "landed": null
+    },
     {
       "id": "0f322ccaa513c588ee83794a938cf5a5",
       "action": "task",
