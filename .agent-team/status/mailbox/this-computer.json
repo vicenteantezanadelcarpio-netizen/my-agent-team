@@ -1,6 +1,6 @@
 {
   "schema": "agent-mailbox/v1",
-  "takenAt": "2026-11-04T00:35:38Z",
+  "takenAt": "2026-11-04T00:35:43Z",
   "computer": "This computer",
   "runner": "this-computer",
   "allows": {
@@ -23,11 +23,11 @@
     {
       "id": "91066698457adb2267c2f9cecfe52477",
       "action": "move",
-      "state": "claimed",
-      "at": "2026-11-04T00:35:35Z",
+      "state": "ok",
+      "at": "2026-11-04T00:35:41Z",
       "startedAt": null,
-      "finishedAt": null,
-      "commit": null,
+      "finishedAt": "2026-11-04T00:35:41Z",
+      "commit": "bcfe203a2ac0",
       "why": null,
       "landed": null
     },
