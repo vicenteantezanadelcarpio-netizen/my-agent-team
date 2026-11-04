@@ -1,0 +1,23 @@
+{
+  "schema": "agent-mailbox/v1",
+  "takenAt": "2026-11-04T00:23:01Z",
+  "computer": "This computer",
+  "runner": "this-computer",
+  "allows": {
+    "actions": [
+      "task",
+      "move",
+      "approve",
+      "pause",
+      "run",
+      "arm",
+      "skill",
+      "agent"
+    ],
+    "jobs": [
+      "morning-intel",
+      "task-sweep"
+    ]
+  },
+  "orders": []
+}
