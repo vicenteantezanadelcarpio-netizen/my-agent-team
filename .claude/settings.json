@@ -1,0 +1,33 @@
+{
+  "model": "opus",
+  "effortLevel": "high",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/credentials.json)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "mcp__*_send*",
+      "mcp__*_reply*",
+      "mcp__*_forward*",
+      "mcp__*_publish*",
+      "mcp__*_delete*",
+      "mcp__*_trash*"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const f='scripts/check-drift.mjs';require('fs').existsSync(f)&&require('child_process').spawnSync(process.execPath,[f],{stdio:'inherit'})\""
+          }
+        ]
+      }
+    ]
+  }
+}

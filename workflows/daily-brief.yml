@@ -1,0 +1,14 @@
+# One short page each working morning: today's focus, what waits for your yes, what ran overnight, your projects. Reads your repo only; sends nothing.
+name: Daily Brief
+owner: command-center
+steps: [daily-brief]
+trigger:
+  armed: false
+  reason: "Off for now. First set up Command Center (type /command-center-onboarding in Claude Code), then press this job's Run button once and read the brief. When you like it, type /arm in Claude Code to switch it on (the guide called Turn on jobs: the safety test walks you through it) and pick the time you gave in your brief settings."
+  schedule: "weekdays 07:30"
+  fire: true
+output: inbox/{date}/daily-brief.md
+done:
+  looks_like: "One page I can read in two minutes before my first call, that tells me what to focus on and what is waiting for me."
+  must_have: [one focus item with its reason, the hours-saved sentence from npm run brief:hours word for word, the list of things waiting for my yes, what ran overnight and whether it worked, my active projects with their next steps, the files it read]
+  never: [anything sent or posted, an hours figure the ledger did not give, a job called successful without its run log, a made-up meeting or deadline, a secret copied from any file]

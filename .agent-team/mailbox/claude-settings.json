@@ -1,0 +1,33 @@
+{
+  "disableAllHooks": true,
+  "disableSkillShellExecution": true,
+  "enableAllProjectMcpServers": false,
+  "autoMemoryEnabled": false,
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "blockReadsOutsideWorkingDirectories": true,
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.config/**)",
+      "Read(~/.docker/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.local/state/**)",
+      "Read(~/.local/share/agent-mailbox/runner-code/**)",
+      "Read(~/.local/share/agent-status/**)",
+      "Read(~/.hermes/**)",
+      "Read(~/.codex/**)",
+      "Read(~/Library/**)",
+      "Read(~/.claude/**)",
+      "Read(~/.claude.json)",
+      "Read(~/.netrc)",
+      "Read(~/.npmrc)",
+      "Read(~/.git-credentials)",
+      "Edit(~/.local/share/agent-status/**)",
+      "Edit(~/.local/share/agent-mailbox/runner-code/**)",
+      "Edit(//opt/homebrew/**)",
+      "Edit(//usr/local/**)"
+    ]
+  }
+}

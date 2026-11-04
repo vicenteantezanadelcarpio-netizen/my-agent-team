@@ -1,0 +1,10 @@
+# What moved in your market overnight, on your screen before your first call.
+name: Morning Intel
+owner: research
+steps: [scan-market, write-intel-brief]
+trigger:
+  armed: false
+  reason: "Off for now. First check how much of your Claude plan you use (claude.ai/settings/usage). This is usually the first job worth switching on: type /arm in Claude Code when you are ready (the guide called Turn on jobs: the safety test walks you through it)."
+  schedule: "daily 06:30"
+  fire: true
+output: inbox/{date}/morning-intel.md

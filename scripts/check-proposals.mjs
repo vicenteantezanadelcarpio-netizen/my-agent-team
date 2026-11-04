@@ -1,0 +1,96 @@
+// Reads proposals.yml and says whether the team it proposes is actually backed by your ledger.
+//
+// Run it: npm run check:proposals
+//
+// proposals.yml is the one file here written by a model. /match reads the shortlists the engine
+// produced, reads the descriptions, and chooses — because word-counting cannot tell a customer's
+// review from a sales-pipeline review, and a person can. This is the check on that judgment.
+//
+// It re-derives everything from ledger.yml and the catalogue and compares. The skill cannot widen
+// its own remit: it may only answer tasks you named twice, only pick from what the engine offered,
+// only quote your words character for character, and only use the number your ledger produces.
+
+import { loadLedger, formatMoney } from './lib/ledger.mjs'
+import { loadCatalogue } from './lib/catalogue.mjs'
+import { loadProposals, validateProposals, summarizeProposals, listOrEmpty } from './lib/proposals.mjs'
+
+const hours = (value) => `${value.toFixed(1)} hours a week`
+
+async function loadOrExplain(load, missing) {
+  try {
+    return await load()
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.error(missing)
+      process.exit(1)
+    }
+    throw error
+  }
+}
+
+// An optional root for the two DATA files, matching check-ledger.mjs's own argv[2]. The
+// catalogue still comes from this repo - the point is to read somebody's ledger from somewhere
+// else, not to pretend a different repo's agents exist.
+const dataRoot = process.argv[2]
+const ledger = await loadOrExplain(
+  () => loadLedger(dataRoot),
+  'No ledger.yml yet. Ask for one: /ledger'
+)
+const written = await loadOrExplain(
+  () => loadProposals(dataRoot),
+  'No proposals.yml yet. Ask for one: /match'
+)
+const catalogue = await loadCatalogue()
+
+const problems = validateProposals(written, ledger, catalogue)
+if (problems.length) {
+  console.error(`These proposals do not hold up (${problems.length}):\n`)
+  for (const problem of problems) console.error(`  - ${problem}`)
+  console.error('\nNothing gets switched on from a proposal that cannot be traced back to your own words.')
+  process.exit(1)
+}
+
+const summary = summarizeProposals(written, ledger, catalogue)
+
+console.log(
+  `${summary.proposed} proposal${summary.proposed === 1 ? '' : 's'}, covering ${hours(summary.hoursPerWeek)}` +
+    (summary.unpriced ? '' : ` - ${formatMoney(summary.costPerWeek, summary.currency)}`)
+)
+// The rate note explains a missing money column. With nothing proposed there is no column and
+// nothing to explain, so it reads as a second thing that went wrong.
+if (summary.unpriced && summary.proposed > 0) {
+  console.log('No rate recorded, so this is counted in hours only.')
+}
+console.log('')
+
+// Printed, not just counted. An owner has to be able to disagree with a specific line, and every
+// line here carries the three things that let them check it without trusting anybody.
+for (const row of listOrEmpty(written.proposals) ?? []) {
+  console.log(`  ${row.task}`)
+  console.log(`      -> ${row.item}`)
+  console.log(`      you said: "${row.words ?? ''}"`)
+  console.log(`      that is:  ${row.number ?? ''}`)
+  if (row.why) console.log(`      why this one: ${row.why}`)
+  console.log('')
+}
+
+if (summary.gaps) {
+  console.log(`${summary.gaps} thing${summary.gaps === 1 ? '' : 's'} nothing on the team does yet:`)
+  for (const gap of listOrEmpty(written.gaps) ?? []) {
+    console.log(`  - ${gap.task}`)
+    if (gap.question) console.log(`      ${gap.question}`)
+  }
+  console.log('')
+}
+if (summary.parked) console.log(`${summary.parked} parked - nobody named who acts on the output yet`)
+if (summary.notes) console.log(`${summary.notes} mentioned once - not a pattern yet`)
+
+// Zero proposals is a real answer, not an empty one. The closing line must not say "every line
+// above quotes you" over an empty list.
+if (summary.proposed === 0) {
+  console.log('\nNothing on the team matched your week. That is a real answer, not a failed run -')
+  console.log('the gaps above are the specification for what gets built next.')
+} else {
+  console.log('\nEvery line above quotes you, cites your number, and names something that already exists.')
+  console.log('Disagree with any of them and the answer is to change ledger.yml, not this file.')
+}

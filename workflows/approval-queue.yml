@@ -1,0 +1,13 @@
+# Press the button: one numbered list of everything across the team waiting for your yes, with what would happen and what it costs. It approves nothing and sends nothing.
+name: Approval Queue
+owner: command-center
+steps: [approval-queue]
+trigger:
+  armed: false
+  reason: "A button, not a schedule: the morning brief already includes this list. Press it when you want the full list on its own."
+  fire: true
+output: inbox/{date}/approval-queue.md
+done:
+  looks_like: "Every item that needs my yes, in one numbered list, most urgent first, with what happens if I say yes."
+  must_have: [what happens on a yes for each item, the cost or none, the file behind each item, drafts I send myself kept apart]
+  never: [anything approved or handed over by the job itself, an item marked done without me, a draft sent]

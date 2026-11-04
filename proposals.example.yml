@@ -1,0 +1,73 @@
+# What your ledger says your team should be - and nothing more than that.
+#
+# You do not write this by hand. Ask for it:  /match
+# Then check it:                              npm run check:proposals
+#
+# This is the only file here written by judgment rather than by arithmetic. The engine reads your
+# ledger and the catalogue and shows what shares any word with each task - deterministically, up
+# to three, ranked, and a few more only when several tie for third. It does not choose, because
+# comparing words cannot tell a customer's REVIEW from a sales-pipeline REVIEW, and reading the
+# sentence can.
+#
+# So most of what gets shown is wrong, on purpose. Saying no to all of it is a normal, expected
+# answer - see the gaps section, which is where a refusal goes and why.
+#
+# check:proposals then re-derives everything and refuses whatever does not hold up. It cannot
+# answer a task you only mentioned once. It cannot pick something that was not offered. It cannot
+# tidy up your quote or improve on your number. And it cannot stay silent about a task.
+#
+# One line per value. The parser here is deliberately small - no folded blocks. If a reason will
+# not fit on one line, it is too long to be the reason.
+#
+# This example is a filled-in one, matched against ledger.example.yml.
+
+proposals:
+  # task      the task from your ledger, word for word
+  # item      what answers it - agent, skill or workflow, exactly as the repo names it
+  # why       why this one actually does this job. ALWAYS required, including when it was the
+  #           only candidate: "it was the only one" is a fact about the engine, not a reason.
+  # words     YOUR words about it, quoted from the ledger, character for character
+  # number    what the ledger derives from your own figures. Not a rounder, nicer number.
+  #
+  # Those two plus the item are the three citations. The item IS its own citation, which is why
+  # you count three things and see two extra lines.
+
+  - task: Sorting the inbox
+    item: skill:triage-inbox
+    why: "Beat workflow:inbox-triage, which sorts and then drafts replies. You said the sorting is the problem, so this is the narrower one."
+    words: "The inbox eats my morning before I get to anything real"
+    number: "3.3 hours a week, 500 a week"
+
+  - task: Writing the newsletter
+    item: agent:content
+    why: "Its own description ends: posts, captions, and newsletters. Rejected agent:sales and draft-chase-messages, which only shared the word write."
+    words: "I write the newsletter myself and it eats most of an afternoon"
+    number: "3 hours a week, 450 a week"
+
+# Two kinds of thing end up here, and they are worth the same.
+#
+# The first is a task nothing shared a word with. The second - and this is the more common one -
+# is a task the engine DID offer candidates for, all of which were wrong. Saying so is a real
+# answer, and the check requires the reason.
+#
+# This list is the specification for what gets built next. A gap left honest is worth more than a
+# proposal that was almost right.
+gaps:
+  - task: Chasing invoices
+    question: "Offered draft-chase-messages and gone-cold, both on the word chasing. Both chase a prospect who went quiet; you are chasing money you are owed. Nothing here does that - should it?"
+
+  - task: Follow-up emails after a call
+    question: "Offered the email agent on the word email, and morning-intel on the word call. The email agent sweeps an inbox and does not know a call happened. Nothing here follows up a call - should it?"
+
+# Two jobs answer no task in the ledger, because they check the team rather than do your work:
+# Quality Review and Weekly Tune-up. /match can never propose them, so phase 12 of onboarding
+# approves them here instead, with your own yes and the date you said it. These two slugs and no
+# others: npm run check:arming refuses anything else named here, so it is not a way round the
+# ledger.
+standing:
+  - item: workflow:quality-review
+    words: "yes, switch on the Friday quality review"
+    approved: 2026-09-24
+  - item: workflow:weekly-tune-up
+    words: "yes, and the Sunday tune-up"
+    approved: 2026-09-24

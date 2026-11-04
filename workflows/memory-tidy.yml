@@ -1,0 +1,14 @@
+# Once a week, a numbered list of proposed clean-ups to Command Center's memory: duplicates, contradictions, old entries, projects gone quiet. Proposes only; nothing changes until you say which numbers to apply.
+name: Memory Tidy
+owner: command-center
+steps: [tidy-memory]
+trigger:
+  armed: false
+  reason: "Off until there are a few weeks of memory to tidy. Before then, the button does the same job when you want it."
+  schedule: "weekly fri 15:00"
+  fire: true
+output: inbox/{date}/memory-tidy.md
+done:
+  looks_like: "A short numbered list I can say yes or no to in a minute, with the exact before and after for each change."
+  must_have: [each proposal numbered with its file, the exact lines before and after, contradictions listed as questions for me]
+  never: [a memory file changed by the job itself, an active entry removed, a secret kept or repeated]

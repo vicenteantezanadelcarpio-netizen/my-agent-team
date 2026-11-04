@@ -1,0 +1,26 @@
+{
+  "name": "agent-team-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The canonical AI-agent team repo. Cloned by students, scaffolded by /onboard.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "audit:prompts": "node scripts/prompt-audit.mjs",
+    "validate:runs": "node scripts/validate-run-log.mjs",
+    "build:card": "node scripts/build-model-card.mjs",
+    "sync:blocks": "node scripts/sync-prompt-blocks.mjs",
+    "check:ledger": "node scripts/check-ledger.mjs",
+    "check:proposals": "node scripts/check-proposals.mjs",
+    "check:arming": "node scripts/check-arming.mjs",
+    "check:drift": "node scripts/check-drift.mjs",
+    "check:sops": "node scripts/check-sops.mjs",
+    "check:course": "node scripts/check-course-numbers.mjs",
+    "check:verdicts": "node scripts/check-verdicts.mjs",
+    "brief:hours": "node scripts/hours-saved.mjs",
+    "collect:status": "node scripts/collect-status.mjs"
+  }
+}

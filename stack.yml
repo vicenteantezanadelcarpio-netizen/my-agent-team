@@ -1,0 +1,58 @@
+# The starter stack. Every team gets these, without being asked.
+#
+# Four capabilities no agent team should start without: a way to find out what is true
+# today, a way to read official docs instead of guessing, a memory that survives the
+# session, and an honest account of what the work is costing. The fifth - the loop that
+# makes the team better every week - is built into this repo already.
+#
+# `/install-stack` installs and verifies these. The weekly tune-up checks they are still
+# there and still current. You never edit the stack list by hand.
+
+stack:
+  - name: last30days
+    plugin: last30days@last30days-skill
+    marketplace: mvanhorn/last30days-skill
+    gives: What people actually said in the last 30 days - Reddit, X, YouTube, HN, GitHub, the web
+    why: An agent answering from training data is confidently out of date. This is the fix
+    verify: "Run it on a topic you already know well and check the dates are recent"
+
+  - name: context7
+    plugin: context7@claude-plugins-official
+    marketplace: anthropics/claude-plugins-official
+    gives: Official, versioned library and API documentation, on demand
+    why: Connection and API details change monthly. Reading the real docs beats recalling them
+    verify: "Ask it to resolve a library you use and return its current docs"
+
+  - name: claude-mem
+    plugin: claude-mem@thedotmack
+    marketplace: thedotmack/claude-mem
+    gives: Memory that survives a closed session
+    why: The repo is the team's long-term memory; this is the working memory between sessions
+    verify: "Start a fresh session and ask what it remembers from the last one"
+
+  - name: token-saver
+    skill: .claude/skills/token-saver/SKILL.md
+    gives: An honest account of what a session costs, and which model belongs on which job
+    why: Ships in this repo, so no install. Pairs with shared/standards/model-card.md
+    verify: "Ask what this session has cost and why"
+
+  - name: surplus-burn
+    skill: .claude/skills/surplus-burn/SKILL.md
+    gives: Measures how much of the subscription week is still unspent and turns the surplus into reviews, fixes and hardening on existing work
+    why: Unspent capacity on the strongest model expires at every weekly reset. This spends it on quality instead of losing it
+    verify: "Ask how much quota is left this week and when it resets"
+
+# What you pay for the tools this team runs on. The dashboard adds it up per currency - never
+# converted - and flags a plan name that does not match what the usage collector saw.
+#
+# This list is the one part of this file that is yours. `/onboard` asks what you pay and writes
+# it, or ask for a change any time. `price` is a plain number, `currency` a three-letter code,
+# `per` is month or year (a yearly price is shown divided by 12, and says so). For example:
+#
+#   - name: Claude Max 20x
+#     service: claude
+#     price: 200
+#     currency: USD
+#     per: month
+
+subscriptions: []

@@ -1,0 +1,609 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { dirname, join, posix } from 'node:path'
+import { read, exists } from './helpers/repo.mjs'
+import { ALLOWED_ORDERS, CEILINGS, readAllowedOrders } from '../scripts/lib/mailbox/allow.mjs'
+import { ACTIONS, KEY_SHAPE, SECRET_SHAPE } from '../scripts/lib/mailbox/contract.mjs'
+import { defaultPlaces } from '../scripts/lib/mailbox/places.mjs'
+import { readMailboxEnv } from '../scripts/lib/mailbox/keys.mjs'
+import { MINIMUM_VERSION, TOOLS, buildArgv, claudeEnv } from '../scripts/lib/mailbox/claude.mjs'
+import { knownJobs } from '../scripts/lib/mailbox/jobs.mjs'
+import { mailboxPath } from '../scripts/lib/status/mailbox-schema.mjs'
+
+/* The Mac guide is the only thing standing between the owner and a mistyped command on an always-on computer. These hold
+   each claim in it to the code: the places are the code's own, the example allowlist is one the runner accepts, the
+   words in the troubleshooting table are words the code prints, the flags named are the flags it uses, the numbers
+   are its numbers, and every file and link it names exists. */
+
+const GUIDE = '.agent-team/mailbox/README.md'
+const guide = () => read(GUIDE)
+const flat = (text) => text.replace(/\s+/g, ' ')
+const section = (text, from, to) => text.slice(text.indexOf(from), to ? text.indexOf(to, text.indexOf(from) + from.length) : undefined)
+
+// The code builds its paths with the system's separator; the guide is for a Mac.
+const unix = (path) => path.replaceAll('\\', '/')
+
+const blocks = (text) => [...text.matchAll(/```(\w*)\n([\s\S]*?)```/g)].map((match) => ({ language: match[1], body: match[2] }))
+
+test('the guide has the eight steps, in order, and every paste block says it is for the Mac Mini', async () => {
+  const doc = await guide()
+  const steps = [...doc.matchAll(/^### (\d+)\. (.+)$/gm)].map((match) => Number(match[1]))
+  assert.deepEqual(steps, [1, 2, 3, 4, 5, 6, 7, 8])
+  for (const block of blocks(doc).filter((one) => one.language === 'bash')) {
+    assert.match(block.body, /^# on the Mac Mini/, `a paste block does not say where it is for: ${block.body.split('\n')[0]}`)
+  }
+})
+
+test('the guide explains its words before it uses them', async () => {
+  const doc = await guide()
+  const words = section(doc, '## Words used in this guide', '## What it does')
+  for (const word of ['Board', 'Order', 'Runner', 'Allowlist', 'Claim', 'Work copy', 'Team repo']) {
+    assert.ok(words.includes(`**${word}**`), `the glossary does not explain ${word}`)
+  }
+  assert.ok(doc.indexOf('## Words used in this guide') < doc.indexOf('## Set it up'))
+  assert.ok(doc.indexOf('## Words used in this guide') < doc.indexOf('## Where things live'))
+})
+
+test('the folders in the guide are the places the code uses', async () => {
+  const doc = await guide()
+  const places = defaultPlaces('/HOME')
+  for (const [name, path] of Object.entries(places)) {
+    const shown = unix(path).replace('/HOME', '~')
+    assert.ok(doc.includes(shown), `the guide does not name ${name} as ${shown}`)
+  }
+})
+
+test('every file the guide tells you to copy or run exists in the repo', async () => {
+  const doc = await guide()
+  const named = new Set([...doc.matchAll(/runner-code\/([A-Za-z0-9._\/-]+)/g)].map((match) => match[1]))
+  assert.ok(named.size >= 3, 'the guide names almost no files')
+  for (const file of named) assert.ok(await exists(file), `the guide names ${file}, which is not in the repo`)
+})
+
+// --- the example allowlist ---------------------------------------------------------------------------------------
+
+const EXAMPLE = '.agent-team/mailbox/allowed-orders.example.yml'
+
+async function readExample() {
+  const dir = await mkdtemp(join(tmpdir(), 'mailbox-docs-'))
+  try {
+    await writeFile(join(dir, ALLOWED_ORDERS.file), await read(EXAMPLE))
+    return await readAllowedOrders(dir, { hostname: 'sams-mac', username: 'samrivera' })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('the example allowlist is one the runner accepts as it stands, and allows what was decided', async () => {
+  const result = await readExample()
+  assert.equal(result.state, 'ok', `the example does not read: ${result.why}`)
+  assert.deepEqual([...result.allow.jobs.keys()].sort(), ['morning-intel', 'task-sweep'])
+  assert.deepEqual([...result.allow.actions].sort(), [...ACTIONS].sort())
+  assert.deepEqual(result.allow.perDay, { orders: CEILINGS.orders, runs: CEILINGS.runs })
+  for (const [job, minutes] of result.allow.jobs) {
+    assert.ok(knownJobs().includes(job), `${job} is not a job the runner has rules for`)
+    assert.ok(minutes <= CEILINGS.minutes)
+  }
+})
+
+test('the example allowlist names placeholders to change, and its comments give the code\'s own ceilings', async () => {
+  const text = await read(EXAMPLE)
+  assert.match(text, /^board: https:\/\/YOUR-BOARD\./m)
+  assert.match(text, /^repo: YOUR-GITHUB-NAME\/YOUR-TEAM-REPO$/m)
+  assert.ok(text.includes(`${CEILINGS.orders} orders and ${CEILINGS.runs} runs`), 'the example does not say the daily ceilings')
+  assert.ok(text.includes(`(${CEILINGS.minutes} at most)`), 'the example does not say the longest a job may run')
+})
+
+// --- the secrets -----------------------------------------------------------------------------------------------
+
+test('the commands that make the secrets make values the runner accepts, in lines it reads', async () => {
+  const doc = await guide()
+  assert.ok(doc.includes('openssl rand -hex 32'))
+  assert.ok(doc.includes('openssl rand -base64 32'))
+  assert.ok(doc.includes('MAILBOX_KEY=$(openssl rand -hex 32)'))
+  assert.ok(doc.includes('MAILBOX_SECRET_k1=$(openssl rand -base64 32)'))
+  const key = randomBytes(32).toString('hex')
+  const secret = randomBytes(32).toString('base64')
+  assert.match(key, KEY_SHAPE)
+  assert.match(secret, SECRET_SHAPE)
+
+  const dir = await mkdtemp(join(tmpdir(), 'mailbox-docs-env-'))
+  try {
+    const file = join(dir, 'env')
+    await writeFile(file, `MAILBOX_KEY=${key}\nMAILBOX_SECRET_k1=${secret}\n`)
+    const read = await readMailboxEnv(file, { platform: 'win32' })
+    assert.equal(read.state, 'ok')
+    assert.equal(read.key, key)
+    assert.equal(read.secrets.get('k1'), secret)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the guide never asks you to print a secret', async () => {
+  const doc = await guide()
+  for (const block of blocks(doc).filter((one) => one.language === 'bash')) {
+    // A secret goes to the clipboard or into a file, never to the screen.
+    assert.doesNotMatch(block.body, /\bcat\b[^\n]*(env|secret)/i, `a block prints the secrets file: ${block.body.split('\n')[0]}`)
+    assert.doesNotMatch(block.body, /\becho\b[^\n]*\$MAILBOX/, 'a block echoes a secret')
+  }
+  assert.ok(doc.includes('pbcopy'), 'the guide does not copy the secrets to the clipboard')
+})
+
+test('the Vercel names in the guide agree with the allowlist example and with each other', async () => {
+  const doc = flat(await guide())
+  const example = await read(EXAMPLE)
+  for (const setting of ['FIRE_MODE=mailbox', 'MAILBOX_KEY', 'MAILBOX_SECRET', 'MAILBOX_SECRET_ID=k1', 'MAILBOX_RUNNER=mac-mini', 'MAILBOX_POLL_SECONDS=300', 'FIRE_KEY']) {
+    assert.ok(doc.includes(setting), `the guide does not name ${setting}`)
+  }
+  assert.match(example, /^runner: mac-mini$/m)
+  assert.match(doc, /24 or more characters/)
+})
+
+// --- the schedule ----------------------------------------------------------------------------------------------
+
+const PLIST = '.agent-team/mailbox/local.assistant.cockpit-mailbox.plist'
+
+const plistValue = (plist, key) => new RegExp(`<key>${key}</key>\\s*<(?:string|integer)>([^<]*)</(?:string|integer)>`).exec(plist)?.[1]
+
+test('the schedule file runs the runner every five minutes, from the pinned code, as the logged-in user', async () => {
+  const plist = await read(PLIST)
+  assert.equal(plistValue(plist, 'Label'), 'local.assistant.cockpit-mailbox')
+  assert.equal(plistValue(plist, 'StartInterval'), '300')
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/)
+  assert.equal(plistValue(plist, 'LimitLoadToSessionType'), 'Aqua')
+
+  const places = defaultPlaces('/Users/YOUR-MAC-USER')
+  const program = posix.join(unix(places.codeDir), 'scripts', 'mailbox-runner.mjs')
+  assert.ok(plist.includes(`<string>${program}</string>`), `the schedule does not run ${program}`)
+  assert.ok(await exists('scripts/mailbox-runner.mjs'))
+  assert.match(plist, /<string>\/usr\/bin\/env<\/string>\s*<string>node<\/string>/)
+
+  for (const key of ['StandardOutPath', 'StandardErrorPath']) {
+    assert.equal(plistValue(plist, key), posix.join(unix(places.stateDir), 'runner.log'))
+  }
+  const path = plistValue(plist, 'PATH') ?? ''
+  for (const entry of path.split(':')) assert.ok(entry.startsWith('/'), `PATH has a relative entry: ${entry}`)
+})
+
+test('the schedule file holds nothing secret and one placeholder', async () => {
+  const plist = await read(PLIST)
+  assert.doesNotMatch(plist, /ANTHROPIC|MAILBOX_(KEY|SECRET)|FIRE_KEY|TOKEN|PASSWORD/i)
+  assert.deepEqual([...new Set(plist.match(/YOUR-[A-Z-]+/g))], ['YOUR-MAC-USER'])
+  const doc = await guide()
+  assert.ok(doc.includes('s#YOUR-MAC-USER#$(whoami)#g'), 'the guide does not fill in the user name')
+  assert.ok(doc.includes('StartInterval 300'))
+  assert.ok(doc.includes('local.assistant.cockpit-mailbox'))
+})
+
+test('the guide has the runner run once with nothing waiting before the first order, because an order made before it first ran is refused', async () => {
+  const doc = await guide()
+  const step = section(doc, '### 7. One order, watched', '### 8.')
+  const runs = [...step.matchAll(/mailbox-runner\.mjs --once/g)]
+  assert.equal(runs.length, 2, 'step 7 should run the check twice: once empty, once with the order')
+  assert.ok(step.indexOf('mailbox-runner.mjs --once') < step.indexOf('Add task'), 'the empty check comes before the order')
+  assert.match(flat(step), /refuses any order made before it first ran/)
+  // That is the code's rule, not the guide's wish: the claims folder remembers the day it began and the check uses it.
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  assert.ok(tick.includes('claimsSince: store.since'))
+})
+
+test('the guide tells the owner to wait about two minutes after the first check, and says what the board then shows - the words the owner sees, not the word the code uses', async () => {
+  const doc = await guide()
+  const step = flat(section(doc, '### 7. One order, watched', '### 8.'))
+  assert.match(step, /Wait about two minutes/)
+  assert.match(step, /Wait a little longer if your Mac's clock runs ahead of the board's/)
+  assert.ok(step.includes('The board shows it as **refused: not valid**'))
+  assert.match(step, /the order did not pass its checks/)
+  assert.ok(flat(doc).includes("| A test order shows **refused: not valid** right after the runner's first check |"))
+  // The code's word for this refusal is not one the owner ever sees.
+  assert.doesNotMatch(flat(doc), /before-claims/)
+  // The two minutes are the contract's own skew, which is what the store adds (claims.mjs).
+  const { LIFE } = await import('../scripts/lib/mailbox/contract.mjs')
+  assert.equal(LIFE.futureSkewSeconds, 120)
+  assert.ok((await read('scripts/lib/mailbox/claims.mjs')).includes('LIFE.futureSkewSeconds * 1000'))
+})
+
+test('what the guide says the board shows for a too-early order is what the code writes: before-claims is settled as "not-valid", and the contract\'s words for that are the ones in the guide', async () => {
+  // The code: an authentic order the contract's checks turn away with a word that is not one of the status file's own reasons is "not-valid".
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  assert.ok(tick.includes("REFUSAL_FOR[verdict.verdict] ?? 'not-valid'"))
+  const table = tick.match(/const REFUSAL_FOR = ({[^}]*})/)[1]
+  assert.doesNotMatch(table, /before-claims/, 'before-claims has its own reason, so the guide would be wrong')
+  // And the board's words for "not-valid" are the shared contract's.
+  const fixture = JSON.parse(await read('tests/fixtures/mailbox-parity.json'))
+  assert.equal(fixture.status.reasons.refused['not-valid'], 'the order did not pass its checks. On the very first start this is normal: wait two minutes, then send it again')
+})
+
+test('no one paste block in the guide both pauses and un-pauses, or both pauses and removes the LaunchAgent: pasting one block must do one thing', async () => {
+  const doc = await guide()
+  const bash = blocks(doc).filter((one) => one.language === 'bash').map((one) => one.body)
+  // A line that runs a command (a comment does not count).
+  const runs = (body, pattern) => body.split('\n').some((line) => !line.trim().startsWith('#') && pattern.test(line))
+  for (const body of bash) {
+    const touches = runs(body, /^touch .*PAUSE/)
+    const removes = runs(body, /^rm .*PAUSE/)
+    const boots = runs(body, /^launchctl bootout/)
+    assert.ok(!(touches && removes), `a block both creates and removes PAUSE: ${body.split('\n')[1]}`)
+    assert.ok(!((touches || removes) && boots), `a block both pauses or resumes and removes the LaunchAgent: ${body.split('\n')[1]}`)
+  }
+  // The three exist, each as its own block.
+  assert.equal(bash.filter((body) => runs(body, /^touch .*PAUSE/)).length, 1)
+  assert.equal(bash.filter((body) => runs(body, /^rm .*PAUSE/)).length, 1)
+  // Two blocks stop the background job: removing it for good (which also moves the plist) and stopping it for a restore (which does not).
+  assert.equal(bash.filter((body) => runs(body, /^launchctl bootout/)).length, 2)
+  assert.equal(bash.filter((body) => runs(body, /^launchctl bootout/) && runs(body, /^mv /)).length, 1)
+})
+
+test('the guide says a change to any file of the runner code needs a new self-test, and the fingerprint really covers those folders', async () => {
+  const doc = flat(await guide())
+  assert.match(doc, /So is a change to any file of the runner's own code: its program, its libraries or its prompts/)
+  assert.match(doc, /until `--selftest` passes again/)
+  const { CODE_PARTS } = await import('../scripts/lib/mailbox/proof.mjs')
+  for (const part of ['scripts/mailbox-runner.mjs', 'scripts/lib/mailbox', 'scripts/lib/status', '.agent-team/mailbox/prompts']) assert.ok(CODE_PARTS.includes(part), part)
+})
+
+test('the guide says the runner guards .git itself, and the code has both halves: the self-test canary and the snapshot before git', async () => {
+  const doc = flat(await guide())
+  assert.match(doc, /write a file inside the `.git` folder/)
+  assert.match(doc, /those six things/)
+  assert.match(doc, /compares it as soon as Claude stops, before any git command/)
+  assert.match(doc, /The work copy is thrown away and cloned again/)
+  assert.ok((await read('scripts/lib/mailbox/selftest.mjs')).includes("key: 'gitWrite'"))
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  assert.ok(tick.indexOf('gitUnchanged(workDir, before)') < tick.indexOf('await checkChanges({ root: workDir, git: s.git, action, fields, plan })'), 'the snapshot is compared before the first git command after Claude')
+})
+
+test('the guide says what a stop by launchctl bootout does, and the entry file really listens for the signals', async () => {
+  const doc = flat(await guide())
+  assert.match(doc, /Stopping the runner with `launchctl bootout`, a logout, closing the Terminal window or Ctrl-C is treated the same way/)
+  assert.match(doc, /The runner ends Claude and everything Claude started, and it releases its lock/)
+  assert.match(doc, /left as outcome unknown/)
+  const { SIGNALS } = await import('../scripts/lib/mailbox/signals.mjs')
+  assert.deepEqual(Object.keys(SIGNALS).sort(), ['SIGHUP', 'SIGINT', 'SIGTERM'])
+  assert.match(doc, /removes it when it ends, or when you stop it with Ctrl-C or close the Terminal/)
+  assert.ok((await read('scripts/mailbox-runner.mjs')).includes('proc: process'))
+})
+
+test('the guide names the fixed list Claude Code is found by, and it is the list in the code, in the same order', async () => {
+  const doc = flat(await guide())
+  const { claudeFolders } = await import('../scripts/lib/mailbox/claude.mjs')
+  const list = claudeFolders('/Users/owner', 'darwin').map((folder) => unix(folder))
+  assert.deepEqual(list, ['/Users/owner/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'])
+  assert.ok(doc.includes('The list is `~/.local/bin/claude` first, then `/opt/homebrew/bin/claude`, then `/usr/local/bin/claude`'))
+  assert.match(doc, /never by your `PATH`/)
+  assert.match(doc, /`--preflight` lists every copy it finds on that list and says which one the runner uses/)
+})
+
+test('the guide tells the owner to stop the background job for an hour when the state folder is restored or deleted - not to rely on the pause file that lives in that folder - in separate blocks, and says exactly what is protected', async () => {
+  const doc = await guide()
+  const text = flat(section(doc, '### If you restore or delete the state folder', '## What you can look at'))
+  assert.match(text, /An order that already landed in your team repo is never done again/)
+  assert.match(text, /An order that was refused or failed before the restore can be tried again/)
+  assert.match(text, /Every order expires within an hour. So keep the runner stopped for an hour/)
+  assert.match(text, /Do not use the pause file for this. It lives in the folder you are restoring/)
+  // The blocks: stop (no PAUSE involved), and start again; each does one thing.
+  const bash = blocks(section(doc, '### If you restore or delete the state folder', '## What you can look at')).filter((one) => one.language === 'bash').map((one) => one.body)
+  assert.equal(bash.length, 2)
+  assert.match(bash[0], /^launchctl bootout/m)
+  assert.ok(!/PAUSE/.test(bash.join('\n')), 'the pause file is not used')
+  assert.match(bash[1], /^launchctl bootstrap/m)
+  assert.ok(!/bootout/.test(bash[1]))
+  const { LIFE } = await import('../scripts/lib/mailbox/contract.mjs')
+  assert.equal(LIFE.maxSeconds, 3600)
+  // And the code does what the guide says it does: the look at main comes before the first effect, in execute.
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  assert.ok(tick.indexOf('const earlier = await landedCommit') < tick.indexOf("if (action === 'run') return executeRun"))
+})
+
+test('the pause switch and the rollback are in the guide, and the pause file is the one the code reads', async () => {
+  const doc = await guide()
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  assert.ok(tick.includes("join(places.stateDir, 'PAUSE')"))
+  assert.ok(doc.includes('touch ~/.local/state/agent-mailbox/PAUSE'))
+  assert.ok(doc.includes('launchctl bootout'))
+  assert.ok(doc.includes('FIRE_MODE=cloud'))
+})
+
+// --- the words the guide uses for what goes wrong --------------------------------------------------------------
+
+test('every word in the troubleshooting table is a word the code prints', async () => {
+  const doc = await guide()
+  const sources = {
+    tick: await read('scripts/lib/mailbox/tick.mjs'),
+    board: await read('scripts/lib/mailbox/board.mjs'),
+    keys: await read('scripts/lib/mailbox/keys.mjs'),
+    places: await read('scripts/lib/mailbox/places.mjs'),
+    cli: await read('scripts/lib/mailbox/command.mjs'),
+    workcopy: await read('scripts/lib/mailbox/workcopy.mjs')
+  }
+  // [the words in the guide (null: a reason the guide shows inside another), the file that makes them, what to find there]
+  const words = [
+    ['unavailable (no-allowlist)', 'tick', "'no-allowlist'"],
+    ['unavailable (allowlist-board)', 'tick', 'allowlist-${'],
+    ['unavailable (keys-mode)', 'tick', 'keys-${'],
+    [null, 'keys', "return 'mode'"],
+    ['not-ready (places-...)', 'tick', 'places-${'],
+    ['not-ready (key-in-environment)', 'tick', "'key-in-environment'"],
+    ['not-ready (origin-mismatch)', 'tick', "'origin-mismatch'"],
+    ['not-ready (origin-has-login)', 'tick', "'origin-has-login'"],
+    ['not-ready (work-...)', 'tick', 'work-${'],
+    ['not-ready (work-points-elsewhere)', 'workcopy', "why: 'points-elsewhere'"],
+    ['not-ready (work-copy-stuck)', 'tick', "'work-copy-stuck'"],
+    ['board-failed (board-refused)', 'board', "'board-refused'"],
+    ['board-failed (board-unreachable)', 'board', "'board-unreachable'"],
+    ['board-failed (board-bad-answer)', 'board', "'board-bad-answer'"],
+    ['stopped (store)', 'tick', "end('stopped', 'store')"],
+    ['stopped (claim-failed)', 'tick', "'claim-failed'"],
+    ['stopped (counts-damaged)', 'tick', "'counts-damaged'"]
+  ]
+  for (const [wording, file, needle] of words) {
+    if (wording !== null) assert.ok(doc.includes(`\`${wording}\``), `the guide does not show \`${wording}\``)
+    assert.ok(sources[file].includes(needle), `${file} does not make ${wording} (looked for ${needle})`)
+  }
+  // The log line the guide quotes is the one the tick writes.
+  assert.ok(doc.includes('mailbox tick: done - 1 claimed, 1 done, 0 refused, 0 failed'))
+  assert.ok(sources.tick.includes('`mailbox tick: ${state}${why ? ` (${why})` : \'\'} - ${'))
+})
+
+test('the files the guide says to look at are the files the code writes', async () => {
+  const doc = await guide()
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  const allow = await read('scripts/lib/mailbox/allow.mjs')
+  const claims = await read('scripts/lib/mailbox/claims.mjs')
+  assert.ok(doc.includes('last-tick.json') && tick.includes("'last-tick.json'"))
+  assert.ok(doc.includes('claims/<id>.claim/') && claims.includes("folder: 'claims'") && tick.includes('`${id}.claim`'))
+  assert.ok(doc.includes('counts/') && allow.includes("'counts'"))
+  assert.ok(doc.includes('.agent-team/status/mailbox/<computer>.json'))
+  assert.equal(mailboxPath('mac-mini'), '.agent-team/status/mailbox/mac-mini.json')
+})
+
+// --- the safety table ------------------------------------------------------------------------------------------
+
+test('the safety table names the flags the runner really passes, and the tools it really allows', async () => {
+  const doc = await guide()
+  const argv = buildArgv({ prompt: 'p', model: 'sonnet', codeDir: '/code', web: false })
+  for (const flag of ['--restricted', '--setting-sources', '--permission-mode', '--disallowedTools', '--strict-mcp-config', '--disable-slash-commands', '--tools']) {
+    assert.ok(doc.includes(flag), `the guide does not name ${flag}`)
+    assert.ok(argv.includes(flag), `the runner does not pass ${flag}`)
+  }
+  assert.ok(doc.includes('--setting-sources user') && argv.join(' ').includes('--setting-sources user'))
+  assert.ok(doc.includes('--permission-mode dontAsk') && argv.join(' ').includes('--permission-mode dontAsk'))
+  assert.ok(doc.includes('--disallowedTools "mcp__*"') && argv.join(' ').includes('--disallowedTools mcp__*'))
+  assert.equal(TOOLS.length, 7)
+  assert.ok(!TOOLS.includes('Bash'))
+  assert.match(flat(doc), /names only built-in tools and Bash is not one/)
+  for (const rule of ['Read(/**)', 'Edit(/**)', 'blockReadsOutsideWorkingDirectories']) assert.ok(doc.includes(rule), `the guide does not name ${rule}`)
+  assert.ok(!argv.includes('--bare'), 'a run on the subscription login cannot use --bare')
+})
+
+test('the settings file the runner passes switches hooks off and denies the folders the guide lists', async () => {
+  const settings = JSON.parse(await read('.agent-team/mailbox/claude-settings.json'))
+  assert.equal(settings.disableAllHooks, true)
+  assert.equal(settings.permissions.defaultMode, 'dontAsk')
+  const doc = await guide()
+  const denied = settings.permissions.deny.join(' ')
+  for (const folder of ['.ssh', '.config', 'Library', '.claude', '.local/state', 'runner-code']) {
+    assert.ok(denied.includes(folder), `the settings do not deny ${folder}`)
+  }
+  assert.ok(doc.includes('disableAllHooks'))
+  assert.deepEqual(JSON.parse(await read('.agent-team/mailbox/empty-mcp.json')), { mcpServers: {} })
+})
+
+test('the guide links the Claude Code documents that the flags come from', async () => {
+  const doc = await guide()
+  for (const page of ['cli-reference', 'settings-reference', 'headless', 'permissions']) {
+    assert.ok(doc.includes(`https://code.claude.com/docs/en/${page}`), `the guide does not link ${page}`)
+  }
+})
+
+// --- what it admits --------------------------------------------------------------------------------------------
+
+test('the guide marks Windows as not tested and lists what a real Mac still has to prove', async () => {
+  const doc = flat(await guide())
+  const windows = section(doc, '## On a Windows computer', '## Not yet verified')
+  assert.match(windows, /Not tested/)
+  assert.match(windows, /Task Scheduler/)
+  const open = doc.slice(doc.indexOf('## Not yet verified on a real Mac'))
+  for (const word of ['disableAllHooks', '--strict-mcp-config', 'connectors', 'Deployment Protection']) {
+    assert.ok(open.includes(word), `the not-yet-verified list leaves out ${word}`)
+  }
+})
+
+// The runner's own Windows places (places.mjs) are for the runner run on its own. The student board hands in its own (runnerPlacesFor in the
+// board's local/runner.mjs): the code in <board folder>\runner-code, state in state\runner.
+test('on Windows the guide gives the runner\'s own folders as the code has them, and the board\'s runner code as <board folder>\\runner-code', async () => {
+  const windows = flat(section(await guide(), '## On a Windows computer', '## Not yet verified'))
+  const own = defaultPlaces('C:\\Users\\s', { platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\s\\AppData\\Local' } })
+  assert.equal(own.codeDir, 'C:\\Users\\s\\Agent Board\\runner-code')
+  assert.ok(windows.includes('`%USERPROFILE%\\Agent Board\\runner-code`'), 'the runner\'s own code folder')
+  assert.ok(windows.includes('`<board folder>\\runner-code`'), 'the board\'s runner code folder')
+  assert.ok(windows.includes('`%LOCALAPPDATA%\\Agent Board\\state\\runner\\`'), 'the board\'s state folder for the runner')
+  assert.match(windows, /Run on its own without switches/, 'the profile folder is said to be the runner-on-its-own one, not the board\'s')
+})
+
+test('the guide names the oldest Claude Code it will run, and that is the floor in the code', async () => {
+  const doc = await guide()
+  assert.ok(doc.includes(`The protections need Claude Code ${MINIMUM_VERSION.join('.')} or later`), 'the troubleshooting table does not give the floor')
+  assert.doesNotMatch(flat(doc), /the flag is left out/, 'the guide still says a too-old Claude is run without the prompts flag')
+})
+
+test('the guide says what the runner never does', async () => {
+  const doc = flat(await guide())
+  const never = section(doc, '## What it does and what it never does', '## Where things live')
+  for (const thing of ['Open a port', 'Run an order twice', 'Let a card\'s words talk it into anything', 'Let Claude push', 'Make a schedule, a skill or an agent on its own']) {
+    assert.ok(never.includes(thing), `the guide does not say it never: ${thing}`)
+  }
+})
+
+// --- the README and the links ----------------------------------------------------------------------------------
+
+const anchorsIn = (markdown) =>
+  new Set([...markdown.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) =>
+    match[1].trim().toLowerCase().replace(/[^\p{L}\p{N} -]/gu, '').replace(/ /g, '-')))
+
+async function brokenLinks(path) {
+  const text = await read(path)
+  const broken = []
+  for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+    if (/^[a-z]+:/i.test(target)) continue
+    const [file, anchor] = target.split('#')
+    const relative = file ? posix.normalize(posix.join(posix.dirname(path), file)) : path
+    let body
+    try {
+      body = await read(relative)
+    } catch {
+      broken.push(target)
+      continue
+    }
+    if (anchor && relative.endsWith('.md') && !anchorsIn(body).has(anchor)) broken.push(target)
+  }
+  return broken
+}
+
+test('the README has a mailbox section before "never do", linking the guide, and no link in either goes nowhere', async () => {
+  const readme = await read('README.md')
+  const at = readme.indexOf('## Orders on your own computer (the Mac mailbox)')
+  assert.ok(at > 0, 'the README has no mailbox section')
+  assert.ok(at < readme.indexOf('## What this repo will never do'))
+  assert.ok(readme.slice(at).includes('](.agent-team/mailbox/README.md)'))
+  assert.deepEqual(await brokenLinks('README.md'), [])
+  assert.deepEqual(await brokenLinks(GUIDE), [])
+})
+
+// The same rule as the other guides: students may not code, and the owner reads best in short sentences. Code, tables
+// and headings are left out.
+test('the guide is written in short sentences', async () => {
+  const doc = (await guide()).replace(/```[\s\S]*?```/g, '')
+  const sentences = doc
+    .split(/\n\s*\n|\n\s*(?=(?:-|\d+\.)\s)/)
+    .filter((block) => !/^\s*(\||#)/.test(block))
+    .flatMap((block) => block.replace(/\s+/g, ' ').split(/(?<=[.!?])\s+/))
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => /[a-z]/i.test(sentence))
+  const words = sentences.map((sentence) => sentence.split(' ').length)
+  const longest = Math.max(...words)
+  const average = words.reduce((sum, count) => sum + count, 0) / words.length
+  assert.ok(longest <= 30, `a sentence has ${longest} words: "${sentences[words.indexOf(longest)]}"`)
+  assert.ok(average <= 14, `sentences average ${average.toFixed(1)} words`)
+})
+
+test('the guide uses none of the technical words a beginner would not know', async () => {
+  const doc = await guide()
+  for (const word of ['HMAC', 'nonce', 'idempotent', 'OUTCOME_UNKNOWN', 'durably', 'lease', 'process group']) {
+    assert.doesNotMatch(doc, new RegExp(`\\b${word}\\b`, 'i'), `the guide uses "${word}"`)
+  }
+})
+
+test('the guide says how long a lock left by a cut-off check lasts, and that is the code\'s own number', async () => {
+  const { LOCK_STALE_MS } = await import('../scripts/lib/status/commit.mjs')
+  assert.equal(LOCK_STALE_MS, 3600_000)
+  assert.match(flat(await guide()), /lock it left clears itself after an hour/)
+})
+
+// --- the clipboard and the proof ---------------------------------------------------------------------------------
+
+test('the secrets step empties the clipboard after the last secret is pasted, because a clipboard can sync to other devices', async () => {
+  const doc = await guide()
+  const step = section(doc, '### 4. ', '### 5. ')
+  const lastCopy = step.lastIndexOf('| pbcopy;')
+  const clear = step.indexOf('pbcopy < /dev/null')
+  assert.ok(lastCopy > 0 && clear > lastCopy, 'the clipboard is emptied after the last copy, not before')
+  assert.match(flat(step), /sync to your other Apple devices/)
+  const block = blocks(step).find((one) => one.body.includes('pbcopy < /dev/null'))
+  assert.match(block.body, /^# on the Mac Mini/)
+  assert.equal(step.split('pbcopy < /dev/null').length - 1, 1)
+})
+
+test('step 6 says what the self-test plants and proves, that no job runs until it passes, and when to run it again', async () => {
+  const doc = await guide()
+  const step = flat(section(doc, '### 6. ', '### 7. '))
+  for (const part of ['once as the task sweep runs and once as the morning intel runs', 'One is in your home folder', 'one is in `/tmp`', 'one is next to the throwaway folder', 'They are not your real files', 'No job runs until it passes', '`selftest-needed`', 'after every Claude Code update', 'moves? the runner\'s code']) {
+    assert.match(step, new RegExp(part), `step 6 leaves out "${part}"`)
+  }
+  assert.ok(doc.includes('Do this only when `--preflight` ends with "Everything is ready."'), 'step 8 does not wait for the preflight')
+})
+
+test('the guide shows the self-test word the tick logs and the line --preflight prints, and the safety table lists the proof', async () => {
+  const doc = await guide()
+  const tick = await read('scripts/lib/mailbox/tick.mjs')
+  const command = await read('scripts/lib/mailbox/command.mjs')
+  assert.ok(doc.includes('`not ready (selftest-needed)`'))
+  assert.ok(tick.includes("'selftest-needed'"), 'the tick does not make the word the guide shows')
+  assert.ok(doc.includes('`PROBLEM self-test`') && command.includes('self-test: '), '--preflight does not print the line the guide names')
+  assert.ok(flat(doc).includes('| The walls are proven on this Mac before any job runs |'))
+  assert.match(flat(section(doc, '## What it does and what it never does', '## Where things live')), /only after a self-test has proved the walls on this Mac/)
+  assert.match(flat(doc.slice(doc.indexOf('## Not yet verified on a real Mac'))), /`Read\(\/\*\*\)` and `Edit\(\/\*\*\)`/)
+})
+
+// --- where the self-test works, and updates ------------------------------------------------------------------------
+
+test('the guide says the self-test works next to the work copy - the folder the code uses - and removes it afterwards', async () => {
+  const doc = await guide()
+  const places = defaultPlaces('/HOME')
+  const shown = `${unix(dirname(places.workDir)).replace('/HOME', '~')}/selftest`
+  assert.ok(doc.includes(`\`${shown}\``), `the guide does not name the self-test folder as ${shown}`)
+  const flatDoc = flat(doc)
+  assert.match(flatDoc, /\| The self-test folder \| `~\/\.local\/share\/agent-mailbox\/selftest` \| Made by `--selftest` next to the work copy/)
+  assert.match(flat(section(doc, '### 6. ', '### 7. ')), /builds its folder next to the work copy/)
+  assert.match(flat(section(doc, '### 6. ', '### 7. ')), /It leaves alone a folder of that name that it did not make/)
+})
+
+test('the guide says Claude is started with its updates switched off, and that the version is asked just before every job', async () => {
+  const doc = await guide()
+  const flatDoc = flat(doc)
+  const env = claudeEnv({}, 'darwin')
+  for (const name of ['DISABLE_AUTOUPDATER', 'DISABLE_UPDATES']) {
+    assert.ok(doc.includes(`\`${name}=1\``), `the guide does not name ${name}=1`)
+    assert.ok(section(doc, '### 6. ', '### 7. ').includes(`\`${name}=1\``), `step 6 does not name ${name}=1`)
+    assert.ok(section(doc, '## How it keeps your Mac safe', '## On a Windows').includes(`\`${name}=1\``), `the safety table does not name ${name}=1`)
+    assert.equal(env[name], '1', `the runner does not set ${name}`)
+  }
+  assert.match(flatDoc, /asks Claude Code which version it is just before every job/)
+  assert.doesNotMatch(flatDoc, /seen at the runner's daily check/, 'the guide still says an update is seen only at the daily check')
+  assert.match(flatDoc, /follows the link to the program once, asks that file which version it is and starts that same file/)
+  const step = flat(section(doc, '### 6. ', '### 7. '))
+  assert.match(step, /if you use Claude Code yourself and it updates/i)
+  assert.ok(doc.includes('https://code.claude.com/docs/en/env-vars') && doc.includes('https://code.claude.com/docs/en/setup'), 'the pages the switches come from')
+})
+
+test('step 1 checks the places the runner will really use for Claude Code, in the runner\'s order, and points to the native installer for anyone with none', async () => {
+  const doc = await guide()
+  const step = section(doc, '### 1. A read-only look first', '### 2.')
+  const { claudeFolders } = await import('../scripts/lib/mailbox/claude.mjs')
+  const places = claudeFolders('/HOME', 'darwin').map((folder) => `${unix(folder).replace('/HOME', '$HOME')}/claude`)
+  assert.deepEqual(places, ['$HOME/.local/bin/claude', '/opt/homebrew/bin/claude', '/usr/local/bin/claude'])
+  // The one loop in the block names exactly these places, in this order, with quotes only where a variable is.
+  const loop = /for place in (.+); do/.exec(step)[1]
+  assert.equal(loop, `"${places[0]}" ${places[1]} ${places[2]}`)
+  // It does not ask the Terminal's PATH for claude any more: no bare `claude ...` command.
+  const block = blocks(step).find((one) => one.language === 'bash').body
+  assert.ok(!/^\s*claude\s/m.test(block), 'a bare claude command looks at the PATH')
+  assert.ok(/--version/.test(block) && /auth status/.test(block))
+  // What the runner accepts is a file that can be run (findProgram: a file, executable), not a folder named claude.
+  assert.ok(block.includes('if [ -f "$place" ] && [ -x "$place" ]; then'), 'a folder named claude must not count')
+  assert.match(flat(step), /It never looks at your \`PATH\`/)
+  assert.match(flat(step), /A Claude Code from \`nvm\`, or an old \`~\/.claude\/local\` install, is not on that list/)
+  assert.ok(step.includes('https://code.claude.com/docs/en/setup'))
+})
+
+test('every place in the code that points to a step of the guide names a step that exists with that title', async () => {
+  const doc = await guide()
+  const titles = new Map([...doc.matchAll(/^### (\d+)\. (.+)$/gm)].map((match) => [Number(match[1]), match[2]]))
+  const { readdir } = await import('node:fs/promises')
+  const files = (await readdir(new URL('../scripts/lib/mailbox/', import.meta.url))).filter((name) => name.endsWith('.mjs'))
+  let found = 0
+  for (const name of files) {
+    const source = await read(`scripts/lib/mailbox/${name}`)
+    for (const match of source.matchAll(/the guide's step (\d+)(?:, "([^"]+)")?/g)) {
+      found += 1
+      assert.ok(titles.has(Number(match[1])), `${name} points to step ${match[1]}, which the guide does not have`)
+      if (match[2]) assert.equal(titles.get(Number(match[1])), match[2], `${name}: step ${match[1]} is not called that`)
+    }
+  }
+  assert.ok(found >= 1, 'the work copy comment in gitguard.mjs is found')
+  assert.equal(titles.get(3), 'The work copy')
+})

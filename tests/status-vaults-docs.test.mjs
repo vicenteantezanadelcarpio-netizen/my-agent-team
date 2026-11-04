@@ -1,0 +1,295 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { read, exists } from './helpers/repo.mjs'
+import { parseSimpleYaml } from '../scripts/lib/yaml-lite.mjs'
+import {
+  VAULTS_CAPS,
+  VAULTS_SCHEMA,
+  VAULTS_FOLDER,
+  VAULTS_STALE_AFTER_DAYS,
+  VAULTS_MAX_FILE_BYTES,
+  NOTE_MAX_BYTES,
+  VAULT_BYTES_BUDGET,
+  REWRITE_AFTER_HOURS,
+  MAX_TAGS_PER_NOTE,
+  TITLE_RULE
+} from '../scripts/lib/status/vaults-schema.mjs'
+import { WALK_LIMITS, VAULTS_YML, ALLOWED_VAULTS, readAllowedVaults } from '../scripts/lib/status/vaults.mjs'
+import { team } from './helpers/obsidian-home.mjs'
+
+/* The memory graph collector's paperwork: the status README (the file, what is read, the two levels, the title
+   rule, the caps, when it is written, what is never written, what moving the pin adds, what is not verified),
+   the vaults.yml starter the owner edits by asking Claude, and the paragraph in the main README. Each is held to
+   the code: the words are the contract's and the numbers are the code's. */
+
+const flat = (text) => text.replace(/\s+/g, ' ')
+const section = (text, heading) => {
+  const start = text.indexOf(heading)
+  assert.ok(start >= 0, `no section ${heading}`)
+  const next = text.indexOf('\n## ', start + heading.length)
+  return text.slice(start, next < 0 ? undefined : next)
+}
+const kb = (bytes) => `${bytes / 1024} KB`
+const thousands = (number) => number.toLocaleString('en-US')
+
+test('the status README lists the vaults file with its schema, folder and contract, and says there are five parts', async () => {
+  const doc = await read('.agent-team/status/README.md')
+  for (const phrase of [
+    '**vaults**',
+    '.agent-team/status/vaults/<computer>.json',
+    VAULTS_SCHEMA,
+    VAULTS_FOLDER,
+    '--only usage,connections,hermes,jobs,vaults',
+    '--only vaults --dry-run',
+    'tests/fixtures/vaults-parity.json',
+    'scripts/lib/status/vaults-schema.mjs',
+    '[`vaults.yml`](../../vaults.yml)'
+  ]) {
+    assert.ok(doc.includes(phrase), `the status README does not mention ${phrase}`)
+  }
+  assert.ok(await exists('vaults.yml'), 'the README links to a vaults.yml that is not there')
+})
+
+test('the vaults section says which vaults are opened, where Obsidian keeps its list on each system, and what is read from a note', async () => {
+  const doc = flat(section(await read('.agent-team/status/README.md'), '## The vaults file'))
+  assert.match(doc, /The computer decides which vaults may be read; the team repo can only narrow that/)
+  assert.match(doc, /A vault that this computer's `allowed-vaults\.yml` does not name is never opened, whatever the team repo says/)
+  assert.match(doc, /not listed, not counted and not mentioned/)
+  for (const phrase of [
+    '~/Library/Application Support/obsidian/obsidian.json',
+    '%APPDATA%\\obsidian\\obsidian.json',
+    '~/.config/obsidian/obsidian.json',
+    'only when a vault is named',
+    'never a link',
+    '.obsidian',
+    '.trash',
+    'node_modules',
+    '`date` and `created`',
+    '`tags`, `tag`, `project` and `people`',
+    'Two vaults with one folder name'
+  ]) {
+    assert.ok(doc.includes(phrase), `the vaults section does not mention ${phrase}`)
+  }
+  assert.match(doc, /What a note says is never kept, at either level/i)
+  assert.match(doc, /place is used to open the vault and is never kept/)
+  assert.match(doc, /holds the username/)
+})
+
+test('the vaults section gives the numbers the code uses', async () => {
+  const doc = flat(section(await read('.agent-team/status/README.md'), '## The vaults file'))
+  assert.match(doc, new RegExp(`${VAULTS_CAPS.vaults} vaults,? ${VAULTS_CAPS.notes} notes,? ${thousands(VAULTS_CAPS.lines)} lines and ${VAULTS_CAPS.hubs} hubs`))
+  assert.match(doc, new RegExp(`${kb(NOTE_MAX_BYTES)}`))
+  assert.match(doc, new RegExp(`${kb(VAULT_BYTES_BUDGET)} for a vault`))
+  assert.match(doc, new RegExp(`under ${kb(VAULTS_MAX_FILE_BYTES)}`))
+  assert.match(doc, new RegExp(`${WALK_LIMITS.depth} folders deep and ${thousands(WALK_LIMITS.entries)} entries`))
+  assert.match(doc, new RegExp(`${REWRITE_AFTER_HOURS} hours old`))
+  assert.match(doc, new RegExp(`stale\\s+after ${VAULTS_STALE_AFTER_DAYS} days`))
+  assert.match(doc, new RegExp(`up to ${VAULTS_YML.maxBytes / 1024} KB`))
+  assert.match(doc, /first eight tags/)
+  assert.equal(MAX_TAGS_PER_NOTE, 8)
+  assert.match(doc, /Three vaults at most/)
+  assert.equal(VAULTS_CAPS.vaults, 3)
+})
+
+test('the vaults section explains the two levels, the title rule and what was left out', async () => {
+  const doc = flat(section(await read('.agent-team/status/README.md'), '## The vaults file'))
+  assert.match(doc, /`level: shape` \(the default\)/)
+  assert.match(doc, /`level: titles`/)
+  assert.match(doc, /Only the exact word `titles` turns it on/)
+  assert.match(doc, new RegExp(`${TITLE_RULE.maxLength} characters at most`))
+  assert.match(doc, new RegExp(`stretch of ${TITLE_RULE.maxSegmentLength + 1} characters`))
+  for (const fragment of ['`@`', '`/`', '`\\`', '`eyj`', '`sk-`', '`bearer`']) assert.ok(doc.includes(fragment), `the title rule leaves out ${fragment}`)
+  assert.match(doc, /owner's username, computer name or home folder/)
+  assert.match(doc, /counted in `untitled`/)
+  for (const word of ['`hidden`', '`more`', '`moreLines`', '`lonely`']) assert.ok(doc.includes(word), `the vaults section does not explain ${word}`)
+  assert.match(doc, /tag lines go\s+first, then day lines, then mentions, then links/)
+  assert.match(doc, /a hub left with fewer than two lines goes with them/)
+  assert.match(doc, /the hubs go first, then the last notes, a tenth at a time/)
+})
+
+test('the vaults section says when the file is written, and why', async () => {
+  const doc = flat(section(await read('.agent-team/status/README.md'), '## The vaults file'))
+  assert.match(doc, /is \*\*not rewritten\*\* until that one is 24 hours old/)
+  assert.match(doc, /about 2 MB a day/)
+  assert.match(doc, /If nothing is both allowed and named, \*\*no file is written at all\*\*/)
+  assert.match(doc, /replaced once by one that says `not found`/)
+  assert.match(doc, /`could not be read` \(the allowlist, `vaults\.yml` or Obsidian's list is broken\)/)
+  assert.match(doc, /`refused by the safety check`/)
+  assert.match(doc, /a vaults file the safety check refuses is written as unavailable and the other files are still written/)
+})
+
+const vaultsSection = async () => section(await read('.agent-team/status/README.md'), '## The vaults file')
+
+test('the docs say plainly why the list of vaults lives on the computer, and what it can and cannot do', async () => {
+  const doc = flat(await vaultsSection())
+  assert.match(doc, /### Why the list of vaults lives on the computer/)
+  for (const phrase of [
+    'Other people can push to it, and so can cloud routines that act for you',
+    'name any vault on the Mac',
+    "a therapist's notes",
+    'the same principle as the pinned code checkout',
+    '`~/.local/state/agent-status-collector/`',
+    'outside both the code checkout and the data clone',
+    'refuses to run with a state folder inside the clone',
+    'inside that copy, given or by default',
+    'so neither a push nor a pull can write or replace the file',
+    'can **never** add a vault the allowlist does not name, or raise a level',
+    'is ignored',
+    'a count, never a name',
+    '**No `allowed-vaults.yml`: nothing is read**',
+    'not even `vaults.yml`',
+    'is read neither as "nothing is allowed" nor as "everything"',
+    'the part says `unavailable` and nothing is read',
+    'Only `vaults: []` says that nothing is allowed',
+    'stays in the team repo\'s git history'
+  ]) {
+    assert.ok(doc.includes(phrase), `the section does not say ${phrase}`)
+  }
+  assert.equal(ALLOWED_VAULTS.file, 'allowed-vaults.yml')
+})
+
+test('the docs show how to choose which vaults, on the Mac Mini and on Windows, and that the board never writes either file', async () => {
+  const doc = flat(await vaultsSection())
+  assert.match(doc, /### How to choose which vaults/)
+  assert.match(doc, /\*\*On the computer, allow the vault\*\* \(once for each vault\)\. On the Mac Mini, in Terminal/)
+  assert.match(doc, /On Windows, in PowerShell/)
+  assert.match(doc, /If you run the collector with `--state-dir`, put the file in that folder instead/)
+  assert.match(doc, /add my Second Brain vault to the memory graph/)
+  assert.match(doc, /show titles for my Ideas vault/)
+  assert.match(doc, /it takes effect only if the allowlist on the computer also says `titles`/)
+  assert.match(doc, /It never writes `vaults\.yml`, and nothing in the team repo can write the allowlist/)
+  assert.match(doc, /npm run collect:status -- --only vaults/) // spawn-scan: not a run
+})
+
+// The commands are what a student pastes. They are held to the code: run as written, they make a file the
+// collector reads as the section says.
+test('the copy-paste block for the Mac makes an allowlist the collector reads: Second Brain up to titles, Ideas as dots', async () => {
+  const text = await vaultsSection()
+  const bash = /```bash\n([\s\S]*?)```/.exec(text)?.[1]
+  assert.ok(bash, 'no bash block')
+  assert.match(bash, /mkdir -p ~\/\.local\/state\/agent-status-collector/)
+  assert.match(bash, /cat > ~\/\.local\/state\/agent-status-collector\/allowed-vaults\.yml <<'EOF'/)
+  const body = /<<'EOF'\n([\s\S]*?)\n\s*EOF/.exec(bash)?.[1]
+  assert.ok(body, 'no heredoc')
+  // In the list the block is indented three spaces; copied from the page that indent is gone.
+  const file = body.split('\n').map((line) => line.replace(/^ {3}/, '')).join('\n') + '\n'
+  const state = await team({ [ALLOWED_VAULTS.file]: file })
+  try {
+    assert.deepEqual([...(await readAllowedVaults(state.dir)).allowed], [['second brain', 'titles'], ['ideas', 'shape']])
+  } finally {
+    await state.cleanup()
+  }
+})
+
+test('the copy-paste block for Windows makes the same allowlist, in the same place under the user folder', async () => {
+  const text = await vaultsSection()
+  const powershell = /```powershell\n([\s\S]*?)```/.exec(text)?.[1]
+  assert.ok(powershell, 'no powershell block')
+  assert.match(powershell, /New-Item -ItemType Directory -Force "\$HOME\\\.local\\state\\agent-status-collector"/)
+  assert.match(powershell, /Set-Content -Path "\$HOME\\\.local\\state\\agent-status-collector\\allowed-vaults\.yml"/)
+  const lines = [...(/-Value @\(([\s\S]*?)\)/.exec(powershell)?.[1] ?? '').matchAll(/'([^']*)'/g)].map((match) => match[1])
+  assert.deepEqual(lines, ['vaults:', '  - name: Second Brain', '    level: titles', '  - name: Ideas'])
+  const state = await team({ [ALLOWED_VAULTS.file]: lines.join('\r\n') + '\r\n' })
+  try {
+    assert.deepEqual([...(await readAllowedVaults(state.dir)).allowed], [['second brain', 'titles'], ['ideas', 'shape']])
+  } finally {
+    await state.cleanup()
+  }
+})
+
+test('the never-written list covers a note\'s text, the dot folders, unnamed vaults and the vault\'s place', async () => {
+  const doc = flat(section(await read('.agent-team/status/README.md'), '## What is never written'))
+  const vaults = doc.slice(doc.indexOf('from vaults:'))
+  assert.ok(vaults.length > 20, 'no "from vaults" item')
+  for (const phrase of ['what a note says', 'its text', 'its headings', 'frontmatter', 'its path', '.obsidian', '.trash', 'never opened', 'a vault this computer does not allow, or the team repo does not name', "the vault's place", 'Obsidian\'s ids', 'at the `shape` level, any title']) {
+    assert.ok(vaults.includes(phrase), `the never-written list leaves out ${phrase}`)
+  }
+})
+
+test('the receipts paragraph names the vaults sources, as a status and a count', async () => {
+  const doc = flat(section(await read('.agent-team/status/README.md'), '## Receipts'))
+  assert.match(doc, /for vaults: its status and how many vaults were listed/)
+})
+
+test('the Mac schedule note says what moving the pin to the memory-graph version adds, what it costs, and how to keep it out', async () => {
+  const doc = await read('.agent-team/status/README.md')
+  const start = doc.indexOf('### What changes when you move the pin to the memory-graph version')
+  assert.ok(start > 0)
+  const note = flat(doc.slice(start, doc.indexOf('\n### ', start + 1)))
+  assert.match(note, /adds one more part/)
+  assert.match(note, /\*\*vaults\*\*/)
+  assert.match(note, /looks for `allowed-vaults\.yml` in the state folder/)
+  assert.match(note, /If there is none, that is all it does/)
+  assert.match(note, /reads nothing else \(not `vaults\.yml`, not Obsidian's list, not a vault\), writes no file, and the log says so/)
+  assert.match(note, /`vaults\.yml` from the data clone/)
+  assert.match(note, /If nothing is both allowed and named, that is all/)
+  assert.match(note, /up to 600 `\.md` notes in memory/)
+  assert.match(note, /The Mac reads no vault until you allow one on the Mac itself/)
+  assert.match(note, /\(#how-to-choose-which-vaults\)/)
+  assert.match(note, /runs no program, and keeps no note text/)
+  // The cost: files read, with the honest caveat that timings on the Mac are not verified.
+  assert.match(note, /Timings on the Mac are not verified/)
+  assert.match(note, /with no allowlist, no file read at all/)
+  assert.match(note, /2 files read/)
+  assert.match(note, /603 files read/)
+  assert.match(note, /1,803 files read/)
+  assert.match(note, /`usage,connections,hermes,jobs` leaves out only the vaults part/)
+  assert.match(note, /never create\s+`allowed-vaults\.yml`/)
+})
+
+test('what is not verified about the memory graph is said, not assumed', async () => {
+  const doc = await read('.agent-team/status/README.md')
+  const unverified = flat(doc.slice(doc.lastIndexOf('### Not verified yet')))
+  for (const phrase of ['the memory graph on the Mac', 'obsidian.json', 'Documents, Desktop or iCloud Drive', 'counted in `hidden`', 'no timings are given above']) {
+    assert.ok(unverified.includes(phrase), `the not-verified list leaves out ${phrase}`)
+  }
+})
+
+test('the main README tells a reader the memory graph exists, what it never publishes, and where to read how it works', async () => {
+  const readme = await read('README.md')
+  const graph = section(readme, '## The memory graph')
+  assert.match(graph, /decided \*\*on your computer\*\*, in a file only you can\s+write \(`allowed-vaults\.yml`\)/)
+  assert.match(graph, /which other people and cloud routines can push to/)
+  assert.match(graph, /With no such file it reads nothing/)
+  assert.match(graph, /only chooses among them, and can only ask for less/)
+  assert.match(graph, /vaults\.yml/)
+  assert.match(graph, /numbers and anonymous dots only/)
+  assert.match(graph, /titles/)
+  assert.match(graph, /never publishes what a note says/)
+  assert.match(graph, /\.agent-team\/status\/README\.md#the-vaults-file/)
+})
+
+test('the vaults.yml starter names nothing, shows the two levels, says what each shares, and has no inline comments', async () => {
+  const text = await read('vaults.yml')
+  assert.deepEqual(parseSimpleYaml(text), { vaults: [] })
+  assert.match(text, /^vaults: \[\]$/m)
+  assert.match(text, /This file chooses which vaults to draw\. It does not decide which may be read/)
+  assert.match(flat(text.replace(/^#/gm, '')), /allowed-vaults\.yml in the collector's state folder/)
+  assert.match(text, /what it says can never add a vault or raise a level\. It can only narrow/)
+  assert.match(text, /With no allowed-vaults\.yml on a computer, nothing is read there, whatever this file says/)
+  assert.match(text, /shape\s+\(the default\)/)
+  assert.match(text, /^#\s+titles\s/m)
+  assert.match(text, /Only the exact word titles turns titles on/)
+  assert.match(text, new RegExp(`At most ${VAULTS_CAPS.vaults} vaults are read, and from each up to ${VAULTS_CAPS.notes} notes`))
+  assert.match(text, new RegExp(`over ${NOTE_MAX_BYTES / 1024} KB`))
+  assert.match(text, /It never writes it, so you change it by asking Claude/)
+  // The collector's reader does not strip a comment after a value, so a line that is not a comment holds none.
+  for (const line of text.split('\n')) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue
+    assert.ok(!line.includes('#'), `an inline comment: ${line}`)
+  }
+  assert.ok(Buffer.byteLength(text) < VAULTS_YML.maxBytes)
+})
+
+test('the commented examples in the starter are what they say: uncommented, they name two vaults at two levels', async () => {
+  const text = await read('vaults.yml')
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => line.startsWith('# vaults:'))
+  assert.ok(start > 0, 'no example')
+  const example = []
+  for (const line of lines.slice(start)) {
+    if (!line.startsWith('#')) break
+    example.push(line.replace(/^# ?/, ''))
+  }
+  assert.deepEqual(parseSimpleYaml(example.join('\n')), { vaults: [{ name: 'Second Brain' }, { name: 'Ideas', level: 'titles' }] })
+})

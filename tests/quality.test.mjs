@@ -1,0 +1,351 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { fromRoot, read, exists } from './helpers/repo.mjs'
+import { loadWorkflows, normaliseSteps } from '../scripts/lib/workflows.mjs'
+import { validateRunLog, QUALITY_VERDICTS } from '../scripts/lib/run-log.mjs'
+
+const fixture = async (name) => JSON.parse(await readFile(fromRoot('tests/fixtures/runs', name), 'utf8'))
+const graded = async (quality) => {
+  const entry = await fixture('valid-schedule.json')
+  return { ...entry, quality }
+}
+const problemsFor = async (quality) => {
+  const entry = await graded(quality)
+  return validateRunLog(entry, { filename: `${entry.run_id}.json` })
+}
+
+const VALID_QUALITY = { rubric: 'content', score: 11, total: 12, verdict: 'passed', retried: false }
+
+// --- the grade is recorded, or the weekly review counts nothing -----------------------
+
+test('a run log may carry a quality block, and a well-formed one validates', async () => {
+  assert.deepEqual(await problemsFor(VALID_QUALITY), [])
+})
+
+test('a run log with no quality block is still valid - not every job is graded', async () => {
+  const entry = await fixture('valid-schedule.json')
+  assert.deepEqual(validateRunLog(entry, { filename: `${entry.run_id}.json` }), [])
+})
+
+test('a score above its total is rejected', async () => {
+  const problems = await problemsFor({ ...VALID_QUALITY, score: 13 })
+  assert.ok(problems.some((problem) => /cannot exceed/i.test(problem)), problems.join('; '))
+})
+
+test('an invented verdict is rejected, so passed and flagged stay the only two', async () => {
+  const problems = await problemsFor({ ...VALID_QUALITY, verdict: 'excellent' })
+  assert.ok(problems.some((problem) => /verdict/i.test(problem)), problems.join('; '))
+  assert.deepEqual(QUALITY_VERDICTS, ['passed', 'flagged'])
+})
+
+test('the rubric that was marked against must be named', async () => {
+  const problems = await problemsFor({ ...VALID_QUALITY, rubric: '' })
+  assert.ok(problems.some((problem) => /rubric/i.test(problem)), problems.join('; '))
+})
+
+test('whether the piece was sent back once has to be recorded', async () => {
+  const problems = await problemsFor({ ...VALID_QUALITY, retried: 'yes' })
+  assert.ok(problems.some((problem) => /retried/i.test(problem)), problems.join('; '))
+})
+
+// --- grading is wired into the work, not an optional extra ---------------------------
+
+test('the draft queue ends in a grading step - writing is never the last word', async () => {
+  const workflows = await loadWorkflows()
+  const draftQueue = workflows.find((workflow) => workflow.slug === 'draft-queue')
+  assert.ok(draftQueue, 'workflows/draft-queue.yml is missing')
+  const steps = normaliseSteps(draftQueue.data.steps)
+  assert.equal(steps.at(-1), 'review-draft', 'the grader must be the closing step')
+})
+
+test('every workflow that gets graded declares what good looks like', async () => {
+  for (const workflow of await loadWorkflows()) {
+    const steps = normaliseSteps(workflow.data.steps) ?? []
+    if (!steps.includes('review-draft')) continue
+    const done = workflow.data.done
+    assert.ok(done, `${workflow.slug} is graded but has no done block to grade against`)
+    assert.equal(typeof done.looks_like, 'string', `${workflow.slug}: done.looks_like must be a sentence`)
+    assert.ok(Array.isArray(done.must_have) && done.must_have.length, `${workflow.slug}: done.must_have is empty`)
+    assert.ok(Array.isArray(done.never) && done.never.length, `${workflow.slug}: done.never is empty`)
+  }
+})
+
+test('the editor owns the weekly quality review', async () => {
+  const workflows = await loadWorkflows()
+  const review = workflows.find((workflow) => workflow.slug === 'quality-review')
+  assert.ok(review, 'workflows/quality-review.yml is missing')
+  assert.equal(review.data.owner, 'editor')
+})
+
+// --- the rules the whole thing rests on ----------------------------------------------
+
+test('the content rubric is scored and has a stated threshold', async () => {
+  const rubric = await read('shared/standards/rubrics/content.md')
+  assert.match(rubric, /threshold/i, 'a rubric with no threshold cannot fail anything')
+  assert.match(rubric, /no half marks/i, 'half marks are how a grader talks itself into passing')
+  assert.match(rubric, /automatic fail/i, "the owner's never list must outrank the score")
+})
+
+test('failure is retry once, then flag - never a silent bin', async () => {
+  const standard = await read('shared/standards/definition-of-done.md')
+  assert.match(standard, /retry once, then flag/i)
+  const skill = await read('.claude/skills/review-draft/SKILL.md')
+  assert.match(skill, /still lands/i, 'a flagged piece must still reach the owner')
+  assert.match(skill, /never bin/i)
+})
+
+test('the report card format is one format, used by every team', async () => {
+  const standard = await read('shared/standards/definition-of-done.md')
+  for (const field of ['Made:', 'Quality:', 'Confidence:', 'Sources:', 'Needs you:']) {
+    assert.match(standard, new RegExp(`\\*\\*${field}\\*\\*`), `report card is missing ${field}`)
+  }
+})
+
+test('verdicts have somewhere to live and three possible values', async () => {
+  assert.ok(await exists('quality/verdicts'), 'quality/verdicts is missing')
+  const doc = await read('quality/README.md')
+  for (const verdict of ['shipped', 'edited', 'rejected']) {
+    assert.match(doc, new RegExp(`\`${verdict}\``), `quality/README.md never defines ${verdict}`)
+  }
+})
+
+test('a captured verdict must change a file, or the loop never closes', async () => {
+  const skill = await read('.claude/skills/capture-verdict/SKILL.md')
+  assert.match(skill, /shared\/writing-rules\.md/)
+  assert.match(skill, /diary entry/i, 'the skill must say why an unwritten rule is worthless')
+})
+
+test('the weekly review reports acceptance, and says when it has too little to go on', async () => {
+  const skill = await read('.claude/skills/write-quality-review/SKILL.md')
+  assert.match(skill, /acceptance rate/i)
+  assert.match(skill, /unreviewed/i, 'ungraded outputs must not be silently treated as accepted')
+})
+
+test('a specialist never grades its own work', async () => {
+  const routing = await read('.claude/rules/routing.md')
+  assert.match(routing, /never let a specialist grade its own work/i)
+  const skill = await read('.claude/skills/review-draft/SKILL.md')
+  assert.match(skill, /editor/, 'the grading step must delegate to the editor')
+})
+
+/* ---------- the verdict file needs a checker -------------------------------
+
+   runs/ has validate:runs, ledger.yml has check:ledger, proposals.yml has check:proposals,
+   workflows/ has check:arming, and quality/verdicts/ has check:verdicts - the file the entire
+   improvement stage is computed from.
+
+   An unrecognised value leaves BOTH halves of shipped/(shipped+edited+rejected), so dropping a
+   rejection RAISES the acceptance rate; it has to be counted apart. */
+
+const verdictFile = (over = {}) => ({
+  path: 'quality/verdicts/2026-08-30-a-piece.md',
+  source: [
+    '---',
+    `run_id: ${over.run_id ?? '2026-08-30T0546Z-content'}`,
+    `artifact: ${over.artifact ?? 'agents/content/output/a-piece.md'}`,
+    `rubric: ${over.rubric ?? 'content'}`,
+    `verdict: ${over.verdict ?? 'edited'}`,
+    ...(over.graded === null ? [] : [`graded: ${over.graded ?? '11/12'}`]),
+    '---',
+    '',
+    '# A piece',
+    '',
+    '## What changed',
+    'Opening was X. Replaced with Y.',
+    ...(over.rule === null ? [] : ['', '## The rule this becomes', 'Open on something that happened to me.'])
+  ].join('\n')
+})
+
+const KNOWN = {
+  runIds: ['2026-08-30T0546Z-content'],
+  artifacts: ['agents/content/output/a-piece.md'],
+  rubrics: ['content']
+}
+
+test('a well-formed verdict passes', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.deepEqual(validateVerdict(verdictFile(), KNOWN), [])
+})
+
+test('a verdict value outside the three is refused, not dropped', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  const problems = validateVerdict(verdictFile({ verdict: 'partial' }), KNOWN)
+  assert.equal(problems.length, 1, problems.join('\n'))
+  assert.match(problems[0], /not one of shipped, edited, rejected/)
+})
+
+test('a verdict about a piece that does not exist is refused', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  const problems = validateVerdict(verdictFile({ artifact: 'agents/content/output/never-written.md' }), KNOWN)
+  assert.match(problems.join('\n'), /which is not in this repo/)
+})
+
+test('a verdict citing a run that never happened is refused', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.match(
+    validateVerdict(verdictFile({ run_id: '2026-08-30T9999Z-does-not-exist' }), KNOWN).join('\n'),
+    /which has no run log/
+  )
+})
+
+test('a score cannot beat its own total - the same rule run logs already enforce', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.match(validateVerdict(verdictFile({ graded: '47/12' }), KNOWN).join('\n'), /cannot beat its own total/)
+})
+
+test('an ungraded piece is fine - review-draft does not run on every output', async () => {
+  // Sam's content run was invoked directly and carries no quality block, so there is no
+  // score to cite. Demanding one would make the common case unfileable.
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.deepEqual(validateVerdict(verdictFile({ graded: null }), KNOWN), [])
+  assert.deepEqual(validateVerdict(verdictFile({ graded: 'none - review-draft did not run' }), KNOWN), [])
+})
+
+test('a verdict with no rule is a diary entry and is refused', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.match(validateVerdict(verdictFile({ rule: null }), KNOWN).join('\n'), /diary entry/)
+})
+
+test('an unknown list is skipped, not failed - absence is not evidence', async () => {
+  // Called with no `known` at all, the cross-checks have nothing to compare against. A caller
+  // without a list must not turn every verdict into a problem.
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.deepEqual(validateVerdict(verdictFile({ artifact: 'anything/at/all.md', rubric: 'whatever' })), [])
+})
+
+test('a dropped verdict raises the acceptance rate, which is why it must be counted', async () => {
+  const { acceptance } = await import('../scripts/lib/verdicts.mjs')
+  const week = [
+    verdictFile({ verdict: 'shipped' }),
+    verdictFile({ verdict: 'rejected' }),
+    verdictFile({ verdict: 'rejected' })
+  ]
+  assert.equal(acceptance(week).rate, 1 / 3)
+
+  // The same week with one rejection mistyped. Silently dropping it does not report a worse
+  // week - it reports a better one.
+  const mistyped = [week[0], week[1], verdictFile({ verdict: 'binned' })]
+  const got = acceptance(mistyped)
+  assert.equal(got.rate, 1 / 2, 'a dropped rejection moves the rate from 33% to 50%')
+  assert.equal(got.uncountable, 1, 'and the only thing that makes it visible is counting it apart')
+})
+
+/* ---------- a clean week has to be a legal week -------------------------------------------------
+
+   `capture-verdict` says it in as many words: *"it was fine" - that is a `shipped` verdict, and
+   it needs nothing else*. So `validateVerdict` must not demand a "## The rule this becomes" section
+   from a clean verdict, and an owner whose team did good work can get `check:verdicts` to exit clean.
+
+   A clean week is a finished week, not one to distrust. */
+
+test('a shipped verdict with nothing to correct is legal', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.deepEqual(
+    validateVerdict(verdictFile({ verdict: 'shipped', rule: null }), KNOWN),
+    [],
+    'an honest clean week could not pass its own check, so the reader had to invent a criticism'
+  )
+})
+
+test('a correction still owes a rule - that is where the information is', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  for (const verdict of ['edited', 'rejected']) {
+    const problems = validateVerdict(verdictFile({ verdict, rule: null }), KNOWN)
+    assert.ok(
+      problems.some((problem) => problem.includes('The rule this becomes')),
+      `a ${verdict} verdict with no rule passed - the loop stops closing`
+    )
+  }
+})
+
+test('a shipped verdict may still carry a rule if the owner wants one', async () => {
+  const { validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  assert.deepEqual(
+    validateVerdict(verdictFile({ verdict: 'shipped' }), KNOWN),
+    [],
+    'the exemption became a prohibition'
+  )
+})
+
+test('the grade goes on the run whose artifacts name the draft, and both places that say so agree', async () => {
+  const editor = await read('.claude/agents/editor.md')
+  const skill = await read('.claude/skills/review-draft/SKILL.md')
+  for (const [name, body] of [['editor agent', editor], ['review-draft skill', skill]]) {
+    const flat = body.replace(/\s+/g, ' ')
+    assert.match(flat, /`quality` block goes on the run log of the run whose `artifacts` list names the draft/,
+      `${name} must say the grade goes on the run whose artifacts name the draft's file path`)
+    assert.match(flat, /same run/i,
+      `${name} must say what to do when the grader runs inside that same run`)
+  }
+})
+
+/* ---------- a verdict on a workflow's work has somewhere to point ----------------------------
+
+   check:verdicts must know inbox/ as well as the agents/<name>/output/ folders, because every workflow writes to
+   inbox/. Otherwise the first verdict the owner files, on a
+   receipt-chase report, is refused as "not in this repo", and the habit the course closes on
+   fails on the first try for every workflow. */
+
+test('a piece in inbox/ counts as an artifact, and so does one in an agent output folder', async () => {
+  const { artifactPaths } = await import('../scripts/lib/verdicts.mjs')
+  const paths = artifactPaths(
+    ['content/output/a-piece.md', 'content/knowledge/notes.md'],
+    ['2026-09-24/receipt-chase.md', 'README.md']
+  )
+  assert.deepEqual(paths, ['agents/content/output/a-piece.md', 'inbox/2026-09-24/receipt-chase.md'])
+})
+
+test('a listing that could not be read skips the check rather than failing it', async () => {
+  const { artifactPaths } = await import('../scripts/lib/verdicts.mjs')
+  assert.equal(artifactPaths(null, null), null)
+  assert.deepEqual(artifactPaths(null, ['2026-09-24/x.md']), ['inbox/2026-09-24/x.md'])
+})
+
+// Anchored to the workflows themselves, not to today's folder name: if a workflow's output
+// moves, a verdict on it must still be checkable.
+test('every workflow writes somewhere a verdict can point at', async () => {
+  const { artifactPaths, validateVerdict } = await import('../scripts/lib/verdicts.mjs')
+  const workflows = await loadWorkflows()
+  let checked = 0
+  for (const workflow of workflows) {
+    const output = String(workflow.data.output ?? '')
+    if (!output) continue
+    checked++
+    const written = output.replace('{date}', '2026-09-24')
+    const [top, ...rest] = written.split('/')
+    const listing = rest.join('/')
+    const paths = artifactPaths(top === 'agents' ? [listing] : [], top === 'inbox' ? [listing] : [])
+    const problems = validateVerdict(verdictFile({ artifact: written }), { artifacts: paths })
+    assert.deepEqual(problems, [], `${written} (from ${workflow.path}) cannot carry a verdict`)
+  }
+  assert.ok(checked > 0, 'no workflow declared an output, so nothing was checked')
+})
+
+/* The editor must read the business brain for every piece, not only "when you are marking content". Otherwise it
+   could pass a receipt-chase report 5 out of 5 that told the owner to hold a client to Friday because his NIT digit
+   was unknown, when the brain already said any digit puts September's VAT between 13 and 22 October. A grader that
+   never opens the file holding the answer cannot catch that. */
+
+const editorSection = async (heading) => {
+  const card = await read('.claude/agents/editor.md')
+  return card.split(`## ${heading}`)[1]?.split('\n## ')[0] ?? ''
+}
+
+test('the editor reads the business brain for every piece, not only content', async () => {
+  const before = await editorSection('Before you start')
+  assert.ok(before, 'the editor lost its reading list')
+  const line = before.split(/\n(?=\d+\. )/).find((item) => item.includes('business-brain.md')) ?? ''
+  assert.ok(line, 'the editor no longer reads shared/business-brain.md at all')
+  assert.doesNotMatch(line, /when you are marking content/i,
+    'the brain is read only for content, so a report that contradicts it passes')
+})
+
+test('a fact the business brain contradicts fails the piece, like a never hit', async () => {
+  const mark = (await editorSection('How to mark')).replace(/\s+/g, ' ')
+  assert.ok(mark, 'the marking steps are gone')
+  const step = mark.split(/ (?=\d+\. )/).find((item) => /business brain|business-brain/i.test(item)) ?? ''
+  assert.ok(step, 'no marking step checks the piece against the business brain')
+  assert.match(step, /automatic fail/i, 'contradicting the brain is not a fail, so it can still score 5 out of 5')
+  assert.match(mark, /Decide:[^.]*brain/i, 'the pass rule does not mention the brain, so the check does not change the decision')
+})

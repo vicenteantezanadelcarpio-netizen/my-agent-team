@@ -1,0 +1,10 @@
+# Who in your pipeline went quiet, and a chase message drafted for each — sent by you, not it.
+name: Gone Cold
+owner: sales
+steps: [review-pipeline, draft-chase-messages]
+trigger:
+  armed: false
+  reason: "Off until the pipeline has people in it who could go quiet."
+  schedule: "weekly mon 09:00"
+  fire: true
+output: inbox/{date}/gone-cold.md
